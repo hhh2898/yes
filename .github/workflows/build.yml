@@ -1,0 +1,80 @@
+name: Build plugin
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack project zip (used when the zip was uploaded instead of the folders)
+        shell: bash
+        run: |
+          echo "Files in the repo root:"
+          ls -la
+          ZIP=$(ls ./*.zip 2>/dev/null | head -n 1)
+          if [ -n "$ZIP" ]; then
+            echo "Found zip: $ZIP"
+            rm -rf _unz && mkdir _unz
+            unzip -oq "$ZIP" -d _unz
+            BG=$(find _unz -name build.gradle | head -n 1)
+            if [ -z "$BG" ]; then echo "::error::The zip has no build.gradle inside"; exit 1; fi
+            SRC=$(dirname "$BG")
+            rm -rf "$SRC/.github"
+            cp -a "$SRC"/. .
+            rm -rf _unz
+          else
+            echo "No .zip file found in the repo root."
+          fi
+          COUNT=$(find src -name '*.java' 2>/dev/null | wc -l)
+          echo "Java source files found: $COUNT"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::No Java files found. Upload the project zip (as one file, not extracted) to the repo main page."
+            exit 1
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: current
+
+      # Finds the exact paper-api version for your Minecraft version.
+      - name: Find Paper API version
+        shell: bash
+        run: |
+          MC=$(grep '^minecraft_version=' gradle.properties | cut -d= -f2)
+          META=$(curl -fsS https://repo.papermc.io/repository/maven-public/io/papermc/paper/paper-api/maven-metadata.xml)
+          ALL=$(echo "$META" | grep -o '<version>[^<]*</version>' | sed 's/<[^>]*>//g')
+          VER=$(echo "$ALL" | grep "^$MC" | tail -n 1)
+          echo "Minecraft=$MC  paper-api=$VER"
+          if [ -z "$VER" ]; then
+            echo "::error::No paper-api found starting with $MC. Newest versions available:"
+            echo "$ALL" | tail -n 15
+            exit 1
+          fi
+          sed -i "s/^paper_api_version=.*/paper_api_version=$VER/" gradle.properties
+
+      - name: Build
+        shell: bash
+        run: gradle build --stacktrace 2>&1 | tee build-log.txt
+
+      - name: Save build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build-log.txt
+          if-no-files-found: ignore
+
+      - name: Save the plugin jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: rugged-survival-plugin
+          path: build/libs/*.jar
